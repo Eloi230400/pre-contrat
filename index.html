@@ -509,14 +509,28 @@ function adressePostale() {
   if (S.type === "Société étrangère" && $("#pays").value && $("#pays").value !== "Autre pays (hors UE)" && !/\b(belgique|suisse|luxembourg|allemagne|espagne|italie)\b/i.test(ligneAdresse())) lines.push($("#pays").value);
   return lines.join("\n");
 }
-function recapLigne() {
+/* récapitulatif affiché en lecture seule à l'étape 2 (3 lignes courtes : titre, identifiant, adresse) */
+function recapParts() {
   const s = S.societe, P = S.partage;
   const adr = adressePostale().split("\n").join(", ");
-  const prec = S.hors ? "adresse saisie librement" : (S.type === "Société française" && S.adrMode === "siege") ? "siège social, annuaire officiel" : S.adr && S.adr.type === "housenumber" ? "adresse vérifiée BAN" : "rue vérifiée BAN";
-  const compl = adrKind() === "siege" && P && !P.error ? (P.domiciliation ? " · domiciliation / centre d'affaires" : P.immeuble ? " · immeuble partagé" : "") : "";
-  if (S.type === "Société française") return `Société française · ${s.raison} · SIRET ${s.siret.replace(/(\d{3})(\d{3})(\d{3})(\d{5})/, "$1 $2 $3 $4")} · ${s.forme} · société active vérifiée le ${new Date().toLocaleDateString("fr-FR")} · Adresse : ${adr} (${prec}${compl})`;
-  if (S.type === "Société étrangère") return `Société étrangère · ${$("#raisonEtr").value.trim()} · ${$("#pays").value}${$("#tva").value.trim() ? " · TVA " + $("#tva").value.replace(/\s/g, "").toUpperCase() : ""}${$("#immat").value.trim() ? " · immatriculation " + $("#immat").value.trim() : ""} · Adresse : ${adr}`;
-  return `Particulier · Adresse : ${adr} (${prec})`;
+  const jour = new Date().toLocaleDateString("fr-FR");
+  let titre, id, lieu;
+  if (S.type === "Société française") {
+    titre = `${s.raison} — ${s.forme}`;
+    id = `SIRET ${s.siret.replace(/(\d{3})(\d{3})(\d{3})(\d{5})/, "$1 $2 $3 $4")} · société active, vérifiée dans l'annuaire officiel le ${jour}`;
+    lieu = S.adrMode === "siege" ? "siège social" : S.hors ? "adresse saisie librement" : "adresse vérifiée";
+    if (S.adrMode === "siege" && P && !P.error && P.domiciliation) lieu += ", domiciliation / centre d'affaires";
+  } else if (S.type === "Société étrangère") {
+    titre = `${$("#raisonEtr").value.trim()} — société étrangère (${$("#pays").value})`;
+    const tva = $("#tva").value.replace(/\s/g, "").toUpperCase(), immat = $("#immat").value.trim();
+    id = [tva ? "TVA intracommunautaire " + tva : "Hors UE, sans n° de TVA intracommunautaire", immat ? "immatriculation " + immat : ""].filter(Boolean).join(" · ");
+    lieu = "adresse hors France, saisie librement";
+  } else {
+    titre = "Particulier";
+    id = S.hors ? "Adresse hors France, saisie librement" : "Adresse vérifiée dans la base officielle des adresses" + (S.imm === "oui" ? " · immeuble / résidence, complément renseigné" : "");
+    lieu = "";
+  }
+  return { titre, id, adresse: adr + (lieu ? ` (${lieu})` : "") };
 }
 function render() {
   const errs = validate();
@@ -543,7 +557,7 @@ $("#go").addEventListener("click", () => {
   q.set("adr_ligne", ligneAdresse());
   q.set("adr_complement", [nomBal(), complement()].filter(Boolean).join("\n"));
   q.set("logement", typeLogement());
-  q.set("recap", recapLigne());
+  const rc = recapParts(); q.set("recap", rc.titre); q.set("recap_id", rc.id); q.set("recap_adresse", rc.adresse);
   q.set("adr_precision", S.hors ? "Hors France (non vérifiée)" : (S.type === "Société française" && S.adrMode === "siege") ? "Siège social (annuaire)" : S.adr.type === "housenumber" ? "Numéro (BAN)" : "Rue (BAN)");
   if (S.type === "Société française") {
     q.set("siret", s.siret); q.set("siren", s.siren); q.set("raison", s.raison); q.set("forme", s.forme); q.set("etat", "Active");
