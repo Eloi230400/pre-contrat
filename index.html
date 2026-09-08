@@ -171,9 +171,15 @@ const CONFIG = {
   PASSTHROUGH: ["appel", "contact", "vendeur"],
   API_ENTREPRISES: "https://recherche-entreprises.api.gouv.fr/search",
   API_ADRESSE: ["https://api-adresse.data.gouv.fr/search/", "https://data.geopf.fr/geocodage/search"],
-  // À partir de ce nombre de sociétés enregistrées à la même adresse (siège), l'adresse est considérée comme partagée
-  // (domiciliation, centre d'affaires, immeuble de bureaux) → n° de bureau / référence obligatoire.
-  SEUIL_ADRESSE_PARTAGEE: 10,
+  // Détection « domiciliation / centre d'affaires » sur l'adresse du siège (n° de bureau ou référence alors obligatoire) :
+  //  - une société de domiciliation (code NAF 82.11Z) est enregistrée à la même adresse, ou
+  //  - une société à cette adresse porte un nom de domiciliataire / centre d'affaires (DOMI_NOMS), ou
+  //  - l'adresse héberge un très grand nombre de sociétés (≥ MIN_EXACT parmi les 25 premiers résultats ET ≥ MIN_TOTAL résultats).
+  // Un simple immeuble partagé (copropriété, immeuble de bureaux) n'est PAS une domiciliation : complément facultatif.
+  DOMI: { NAF: "82.11Z", MIN_EXACT: 20, MIN_TOTAL: 1000 },
+  DOMI_NOMS: /DOMICIL|CENTRE D AFFAIRES|CENTER D AFFAIRES|CENTRE AFFAIRES|BUSINESS CENTER|BUSINESS CENTRE|REGUS|WOJO|KANDBAZ|SEDOMICILIER|TRICOLORES|ABC LIV|DIGIDOM|LEGALPLACE|MULTIBURO|BURO CLUB|STOP WORK|WEWORK|PEPINIERE|HOTEL D ENTREPRISES/,
+  // À partir de ce nombre de sociétés à la même adresse (sans domiciliation détectée) : encart « immeuble partagé », complément facultatif.
+  SEUIL_IMMEUBLE_PARTAGE: 10,
 };
 
 /* ---------- utilitaires ---------- */
@@ -204,7 +210,7 @@ const S = {
   adr: null, // { label, name, postcode, city, type, score } (BAN) ou { libre:true, text }
   hors: false,
   imm: "", // oui | non — « immeuble / résidence ? » (particulier, ou société avec une autre adresse que le siège)
-  partage: null, // siège social : null (pas vérifié) | { loading } | { error } | { count, partagee, complOfficiel }
+  partage: null, // siège social : null (pas vérifié) | { loading } | { error } | { count, total, domiciliation, domiciliataire, immeuble, complOfficiel }
 };
 
 /* ---------- pays ---------- */
@@ -230,7 +236,7 @@ document.querySelectorAll('input[name=type]').forEach((r) => r.addEventListener(
 /* ---------- immeuble / complément d'adresse ---------- */
 const IMM_RE = /\b(r[ée]sidence|r[ée]s\b\.?|b[âa]t(iment)?\b|bat\b|imm(euble)?\b|app?t?\b|appartement|[ée]tage|esc(alier)?\b|porte\b|lot\b|bur(eau)?\b|centre d'affaires|chez\b)/i;
 /* complément explicite (plus strict : pas « porte » ni « lot », fréquents dans les noms de voie) */
-const COMPL_RE = /\b(r[ée]sidence|r[ée]s\b\.?|b[âa]t(iment)?\b|bat\b|imm(euble)?\b|app?t?\b|appartement|[ée]tage|esc(alier)?\b|bur(eau)?\b|centre d'affaires|chez\b|bo[iî]te\b|bp\b|cs\b)/i;
+const COMPL_RE = /\b(r[ée]sidence|r[ée]s\b\.?|b[âa]t(iment)?\b|bat\b|imm(euble)?\b|app?t?\b|appartement|[ée]tage|esc(alier)?\b|bur(eau)?\b|centre d'affaires|chez\b|c ?\/ ?o\b|bo[iî]te\b|bp\b|cs\b)/i;
 function resetImm() { S.imm = ""; document.querySelectorAll('input[name=imm]').forEach((r) => { r.checked = false; }); $("#compl").value = ""; }
 /* mode d'adresse : "siege" (société française, adresse officielle) | "quest" (question immeuble) | "etr" (société étrangère, saisie libre) */
 function adrKind() {
@@ -260,14 +266,21 @@ let partageSeq = 0;
 async function checkPartage(adresse) {
   const seq = ++partageSeq;
   S.partage = { loading: true }; applyImm(); render();
+  const base = `${CONFIG.API_ENTREPRISES}?q=${encodeURIComponent(adresse)}&minimal=true&include=siege,matching_etablissements`;
+  const get = async (url) => { const r = await fetch(url, { headers: { Accept: "application/json" } }); if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); };
+  const k = adrKey(adresse);
+  const ici = (c) => [(c.siege || {}).adresse].concat((c.matching_etablissements || []).map((e) => e.adresse)).some((a) => adrKey(a) === k);
   try {
-    const r = await fetch(`${CONFIG.API_ENTREPRISES}?q=${encodeURIComponent(adresse)}&per_page=25&minimal=true&include=siege,matching_etablissements`, { headers: { Accept: "application/json" } });
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    const j = await r.json();
+    const [j, j2] = await Promise.all([get(base + "&per_page=25"), get(base + "&per_page=10&activite_principale=" + CONFIG.DOMI.NAF).catch(() => null)]);
     if (seq !== partageSeq) return;
-    const k = adrKey(adresse);
-    const count = (j.results || []).filter((c) => [(c.siege || {}).adresse].concat((c.matching_etablissements || []).map((e) => e.adresse)).some((a) => adrKey(a) === k)).length;
-    S.partage = { count, partagee: count >= CONFIG.SEUIL_ADRESSE_PARTAGEE, complOfficiel: COMPL_RE.test(adresse), plafond: count >= 25 };
+    const res = (j.results || []).filter(ici);
+    const count = res.length, total = j.total_results || 0;
+    const domiNaf = j2 ? (j2.results || []).filter(ici) : [];
+    const domiNom = res.filter((c) => CONFIG.DOMI_NOMS.test(normAdr(c.nom_complet || "")));
+    const domiciliation = domiNaf.length > 0 || domiNom.length > 0 || (count >= CONFIG.DOMI.MIN_EXACT && total >= CONFIG.DOMI.MIN_TOTAL);
+    const domiciliataire = ((domiNom[0] || domiNaf[0] || {}).nom_complet || "").replace(/\s*\(.*$/, "");
+    S.partage = { count, total, plafond: count >= 25, domiciliation, domiciliataire, nafVerifie: !!j2,
+      immeuble: !domiciliation && count >= CONFIG.SEUIL_IMMEUBLE_PARTAGE, complOfficiel: COMPL_RE.test(adresse) };
   } catch (e) {
     if (seq !== partageSeq) return;
     S.partage = { error: true, complOfficiel: COMPL_RE.test(adresse) };
@@ -277,7 +290,7 @@ async function checkPartage(adresse) {
 function complRequis() {
   const k = adrKind();
   if (k === "quest") return S.imm === "oui";
-  if (k === "siege") return !!(S.partage && S.partage.partagee && !S.partage.complOfficiel);
+  if (k === "siege") return !!(S.partage && S.partage.domiciliation && !S.partage.complOfficiel);
   return false;
 }
 /* affiche les bons blocs selon le mode d'adresse */
@@ -292,8 +305,9 @@ function applyImm() {
   if (k === "siege" && P) {
     if (P.loading) pb.innerHTML = '<div class="box"><span class="spin"></span> Vérification de l\'adresse du siège (domiciliation, centre d\'affaires ?)…</div>';
     else if (P.error) pb.innerHTML = '<div class="box warn"><div class="t">Adresse du siège non vérifiée</div>Impossible de savoir si cette adresse est une domiciliation ou un centre d\'affaires. Si le client a un n° de bureau ou une référence, indique-le ci-dessous.</div>';
-    else if (P.partagee && P.complOfficiel) pb.innerHTML = `<div class="box ok"><div class="t">✅ Adresse partagée, complément déjà présent</div>Cette adresse héberge ${P.plafond ? "plus de 25" : P.count} sociétés, mais l'adresse officielle contient déjà le complément (bureau, bâtiment, domiciliataire…).</div>`;
-    else if (P.partagee) pb.innerHTML = `<div class="box warn"><div class="t">⚠️ Adresse partagée par ${P.plafond ? "plus de 25" : P.count} sociétés</div>Probablement une domiciliation, un centre d'affaires ou un immeuble de bureaux : demande au client son n° de bureau, sa référence de domiciliation ou le nom du domiciliataire.</div>`;
+    else if (P.domiciliation && P.complOfficiel) pb.innerHTML = `<div class="box ok"><div class="t">✅ Domiciliation, complément déjà présent</div>Adresse de domiciliation / centre d'affaires${P.domiciliataire ? " (" + P.domiciliataire + ")" : ""}, mais l'adresse officielle contient déjà le complément (bureau, domiciliataire…).</div>`;
+    else if (P.domiciliation) pb.innerHTML = `<div class="box warn"><div class="t">⚠️ Adresse de domiciliation / centre d'affaires</div>${P.domiciliataire ? "Domiciliataire repéré à cette adresse : <b>" + P.domiciliataire + "</b>. " : "Cette adresse héberge " + (P.plafond ? "plus de 25" : P.count) + " sociétés. "}Demande au client son n° de bureau, sa référence de domiciliation ou le nom du domiciliataire.</div>`;
+    else if (P.immeuble) pb.innerHTML = `<div class="box ok"><div class="t">✅ Adresse vérifiée — immeuble partagé (${P.plafond ? "25+" : P.count} sociétés)</div>Pas de domiciliation détectée : le courrier arrive au nom de la société. Ajoute un complément (étage, bureau) uniquement si le client en a un.</div>`;
     else pb.innerHTML = `<div class="box ok"><div class="t">✅ Adresse individuelle</div>${P.count <= 1 ? "Seule cette société" : P.count + " sociétés seulement"} à cette adresse : le courrier arrive directement, aucun complément nécessaire.</div>`;
   }
   // champ complément
@@ -481,7 +495,7 @@ function complement() { return $("#complBlock").classList.contains("hidden") ? "
 function nomBal() { return $("#balBlock").classList.contains("hidden") ? "" : $("#bal").value.trim(); }
 function typeLogement() {
   const k = adrKind(), P = S.partage;
-  if (k === "siege") return !P || P.error ? "Siège (partage non vérifié)" : P.partagee ? `Adresse partagée (${P.plafond ? "25+" : P.count} sociétés)` : "Adresse individuelle";
+  if (k === "siege") return !P || P.error ? "Siège (non vérifié)" : P.domiciliation ? "Domiciliation / centre d'affaires" : P.immeuble ? `Immeuble partagé (${P.plafond ? "25+" : P.count} sociétés)` : "Adresse individuelle";
   if (k === "etr") return "Hors France (non précisé)";
   return S.imm === "oui" ? (S.type === "Particulier" ? "Appartement / immeuble" : "Immeuble / centre d'affaires") : (S.type === "Particulier" ? "Maison" : "Accès direct");
 }
