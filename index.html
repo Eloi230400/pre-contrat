@@ -126,24 +126,22 @@
         </div>
       </div>
 
-      <div id="logementBlock" style="margin-top:18px">
-        <legend class="req" id="logLegend">Le client habite…</legend>
-        <p class="hint" id="logHint">Dans un immeuble ou une résidence, sans bâtiment, étage ou n° d'appartement, les courriers n'arrivent pas.</p>
+      <div id="immBlock" class="hidden" style="margin-top:18px">
+        <legend class="req" id="immLegend">Le client habite dans un immeuble ou une résidence ?</legend>
+        <p class="hint" id="immHint">Sans bâtiment, étage ou n° d'appartement, les courriers n'arrivent pas.</p>
         <div class="choices">
-          <label><input type="radio" name="logement" id="logA" value="Maison"> <span id="logAText">Une maison individuelle</span></label>
-          <label><input type="radio" name="logement" id="logB" value="Appartement"> <span id="logBText">Un appartement, immeuble ou résidence</span></label>
+          <label><input type="radio" name="imm" value="oui"> Oui</label>
+          <label><input type="radio" name="imm" value="non"> Non</label>
         </div>
-        <div id="complBlock" class="hidden" style="margin-top:12px">
-          <div id="complSiege" class="box ok hidden" style="margin-bottom:10px"></div>
-          <div class="row">
-            <div><label class="lbl" for="residence" id="residenceLbl">Résidence / lieu-dit</label><input type="text" id="residence" placeholder="ex. Résidence Les Oliviers"></div>
-            <div><label class="lbl" for="batiment">Bâtiment / entrée</label><input type="text" id="batiment" placeholder="ex. Bât. C"></div>
-            <div><label class="lbl" for="etage">Étage</label><input type="text" id="etage" placeholder="ex. 3e étage"></div>
-            <div><label class="lbl" for="appt" id="apptLbl">N° d'appartement / porte</label><input type="text" id="appt" placeholder="ex. Appt 12"></div>
-          </div>
-          <div id="complErr" class="err hidden">Indique au minimum le bâtiment ou le n° d'appartement (ou la résidence).</div>
-        </div>
-        <label class="lbl" for="bal" style="margin-top:12px" id="balLbl">Nom sur la boîte aux lettres <span style="font-weight:400;color:var(--muted)">(si différent du client)</span></label>
+      </div>
+      <div id="partageBlock" class="hidden" style="margin-top:18px"></div>
+      <div id="complBlock" class="hidden" style="margin-top:14px">
+        <label class="lbl" for="compl" id="complLbl">Complément d'adresse</label>
+        <p class="hint" id="complHint"></p>
+        <input type="text" id="compl" autocomplete="off" placeholder="">
+      </div>
+      <div id="balBlock" class="hidden" style="margin-top:12px">
+        <label class="lbl" for="bal">Nom sur la boîte aux lettres <span style="font-weight:400;color:var(--muted)">(facultatif, si différent du client)</span></label>
         <input type="text" id="bal" placeholder="ex. M. et Mme Thomas">
       </div>
     </fieldset>
@@ -173,6 +171,9 @@ const CONFIG = {
   PASSTHROUGH: ["appel", "contact", "vendeur"],
   API_ENTREPRISES: "https://recherche-entreprises.api.gouv.fr/search",
   API_ADRESSE: ["https://api-adresse.data.gouv.fr/search/", "https://data.geopf.fr/geocodage/search"],
+  // À partir de ce nombre de sociétés enregistrées à la même adresse (siège), l'adresse est considérée comme partagée
+  // (domiciliation, centre d'affaires, immeuble de bureaux) → n° de bureau / référence obligatoire.
+  SEUIL_ADRESSE_PARTAGEE: 10,
 };
 
 /* ---------- utilitaires ---------- */
@@ -202,7 +203,8 @@ const S = {
   adrMode: "siege", // siege | autre (sociétés françaises)
   adr: null, // { label, name, postcode, city, type, score } (BAN) ou { libre:true, text }
   hors: false,
-  logement: "", // Particulier : Maison | Appartement — Société : Local indépendant | Immeuble
+  imm: "", // oui | non — « immeuble / résidence ? » (particulier, ou société avec une autre adresse que le siège)
+  partage: null, // siège social : null (pas vérifié) | { loading } | { error } | { count, partagee, complOfficiel }
 };
 
 /* ---------- pays ---------- */
@@ -218,52 +220,103 @@ document.querySelectorAll('input[name=type]').forEach((r) => r.addEventListener(
   $("#siegeChoice").classList.toggle("hidden", S.type !== "Société française");
   const soc = S.type !== "Particulier";
   $("#adrLabel").textContent = soc ? "Adresse de la société (facturation)" : "Adresse postale du client";
-  applyLogementLabels(soc);
+  resetImm();
   S.hors = S.type === "Société étrangère"; S.adr = null; $("#adr").value = ""; $("#adrLibre").value = "";
   applyHors();
   applyAdrMode();
   render();
 }));
 
-/* ---------- libellés « logement » : particulier vs société ---------- */
-const LOG = {
-  part: { legend: "Le client habite…", hint: "Dans un immeuble ou une résidence, sans bâtiment, étage ou n° d'appartement, les courriers n'arrivent pas.",
-    a: ["Maison", "Une maison individuelle"], b: ["Appartement", "Un appartement, immeuble ou résidence"],
-    residence: "Résidence / lieu-dit", residencePh: "ex. Résidence Les Oliviers", appt: "N° d'appartement / porte", apptPh: "ex. Appt 12",
-    bal: "Nom sur la boîte aux lettres", balNote: "(si différent du client)", balPh: "ex. M. et Mme Thomas",
-    complErr: "Indique au minimum le bâtiment ou le n° d'appartement (ou la résidence).", errChoix: "Précise maison ou appartement.", errCompl: "Complément d'adresse manquant (bâtiment ou n° d'appartement)." },
-  soc: { legend: "Les locaux de la société se trouvent…", hint: "Dans un immeuble, une résidence ou un centre d'affaires, sans bâtiment, étage ou n° de bureau, les courriers n'arrivent pas.",
-    a: ["Local indépendant", "Dans un local ou bâtiment indépendant (accès direct depuis la rue)"], b: ["Immeuble", "Dans un immeuble, une résidence ou un centre d'affaires"],
-    residence: "Résidence / centre d'affaires", residencePh: "ex. Centre d'affaires Le Cap", appt: "N° de bureau / porte", apptPh: "ex. Bureau 12",
-    bal: "Nom sur la boîte aux lettres / à l'attention de", balNote: "(si différent de la raison sociale)", balPh: "ex. M. Dupont — Direction",
-    complErr: "Indique au minimum le bâtiment ou le n° de bureau (ou la résidence / le centre d'affaires).", errChoix: "Précise le type de locaux.", errCompl: "Complément d'adresse manquant (bâtiment ou n° de bureau)." },
-};
-function logCfg() { return S.type === "Particulier" ? LOG.part : LOG.soc; }
-function applyLogementLabels(soc) {
-  const L = soc ? LOG.soc : LOG.part;
-  $("#logLegend").textContent = L.legend; $("#logHint").textContent = L.hint;
-  $("#logA").value = L.a[0]; $("#logAText").textContent = L.a[1];
-  $("#logB").value = L.b[0]; $("#logBText").textContent = L.b[1];
-  $("#residenceLbl").textContent = L.residence; $("#residence").placeholder = L.residencePh;
-  $("#apptLbl").textContent = L.appt; $("#appt").placeholder = L.apptPh;
-  $("#balLbl").innerHTML = L.bal + ' <span style="font-weight:400;color:var(--muted)">' + L.balNote + "</span>"; $("#bal").placeholder = L.balPh;
-  $("#complErr").textContent = L.complErr;
-  // le choix précédent n'a plus de sens si le type change
-  $("#logA").checked = false; $("#logB").checked = false; S.logement = "";
-  $("#complBlock").classList.add("hidden");
+/* ---------- immeuble / complément d'adresse ---------- */
+const IMM_RE = /\b(r[ée]sidence|r[ée]s\b\.?|b[âa]t(iment)?\b|bat\b|imm(euble)?\b|app?t?\b|appartement|[ée]tage|esc(alier)?\b|porte\b|lot\b|bur(eau)?\b|centre d'affaires|chez\b)/i;
+/* complément explicite (plus strict : pas « porte » ni « lot », fréquents dans les noms de voie) */
+const COMPL_RE = /\b(r[ée]sidence|r[ée]s\b\.?|b[âa]t(iment)?\b|bat\b|imm(euble)?\b|app?t?\b|appartement|[ée]tage|esc(alier)?\b|bur(eau)?\b|centre d'affaires|chez\b|bo[iî]te\b|bp\b|cs\b)/i;
+function resetImm() { S.imm = ""; document.querySelectorAll('input[name=imm]').forEach((r) => { r.checked = false; }); $("#compl").value = ""; }
+/* mode d'adresse : "siege" (société française, adresse officielle) | "quest" (question immeuble) | "etr" (société étrangère, saisie libre) */
+function adrKind() {
+  if (S.type === "Société française") return S.adrMode === "siege" ? "siege" : "quest";
+  if (S.type === "Société étrangère") return "etr";
+  return "quest";
 }
-function needCompl() { return S.logement === "Appartement" || S.logement === "Immeuble"; }
-const IMM_RE = /\b(r[ée]sidence|r[ée]s\b\.?|b[âa]t(iment)?\b|bat\b|imm(euble)?\b|app?t?\b|appartement|[ée]tage|esc(alier)?\b|porte\b|lot\b|bur(eau)?\b|centre d'affaires)/i;
-/* complément explicite (plus strict que IMM_RE : pas « porte » ni « lot », trop fréquents dans les noms de voie) */
-const COMPL_RE = /\b(r[ée]sidence|r[ée]s\b\.?|b[âa]t(iment)?\b|bat\b|imm(euble)?\b|app?t?\b|appartement|[ée]tage|esc(alier)?\b|bur(eau)?\b|centre d'affaires)/i;
-/* siège social (annuaire) : le complément (bât., résidence…) figure déjà dans l'adresse officielle */
-function siegeAvecComplement() { return S.type === "Société française" && S.adrMode === "siege" && !!(S.societe && S.societe.siege) && COMPL_RE.test(S.societe.siege); }
+function detectImmeuble(txt) {
+  if (S.imm || adrKind() !== "quest") return;
+  if (IMM_RE.test(txt)) { document.querySelector('input[name=imm][value=oui]').checked = true; S.imm = "oui"; applyImm(); }
+}
+document.querySelectorAll('input[name=imm]').forEach((r) => r.addEventListener("change", () => { S.imm = r.value; applyImm(); render(); }));
+["#compl", "#bal"].forEach((sel) => $(sel).addEventListener("input", render));
+
+/* Siège social : combien de sociétés sont enregistrées à cette adresse exacte ? (domiciliation, centre d'affaires…) */
+const normAdr = (a) => (a || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+const VOIES = "RUE|AV|AVENUE|BD|BOULEVARD|CHE|CHEMIN|IMP|IMPASSE|ALL|ALLEE|ALLEES|PL|PLACE|RTE|ROUTE|QUAI|COURS|CRS|SQUARE|SQ|PROMENADE|PROM|PASSAGE|PAS|VOIE|SENTE|SENTIER|CITE|HAMEAU|HAM|LOTISSEMENT|LOT|ZAC|ZA|ZI|ZONE|MAIL|ESPLANADE|ESP|RPT|ROND POINT|CARREFOUR|MONTEE|MTE|TRAVERSE|TRA|VILLA|VLA|DOMAINE|DOM|GRANDE RUE|GR|FAUBOURG|FBG|PARC|PARVIS|PORT|PONT|RESIDENCE|RES|CLOS|COUR|GALERIE|JARDIN|JARDINS|PLAINE|PLATEAU|QUARTIER|QUA|RAMPE|RUELLE|RLE|TERRASSE|TSSE|VALLEE|VENELLE";
+const VOIE_RE = new RegExp("\\b(\\d{1,4})(?: ?(?:BIS|TER|QUATER|[A-Z]))? ((?:" + VOIES + ")\\b.*?) \\d{5}\\b");
+/* clé « numéro + voie » (sans complément, sans CP/ville) pour comparer les adresses de l'annuaire entre elles */
+function adrKey(a) {
+  const n = normAdr(a);
+  let m = n.match(VOIE_RE);
+  if (!m) m = n.match(/^.*\b(\d{1,4})(?: ?(?:BIS|TER|QUATER|[A-Z]))? ([^\d]*?) \d{5}\b/);
+  return m ? m[1] + " " + m[2].trim() : n;
+}
+let partageSeq = 0;
+async function checkPartage(adresse) {
+  const seq = ++partageSeq;
+  S.partage = { loading: true }; applyImm(); render();
+  try {
+    const r = await fetch(`${CONFIG.API_ENTREPRISES}?q=${encodeURIComponent(adresse)}&per_page=25&minimal=true&include=siege,matching_etablissements`, { headers: { Accept: "application/json" } });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    if (seq !== partageSeq) return;
+    const k = adrKey(adresse);
+    const count = (j.results || []).filter((c) => [(c.siege || {}).adresse].concat((c.matching_etablissements || []).map((e) => e.adresse)).some((a) => adrKey(a) === k)).length;
+    S.partage = { count, partagee: count >= CONFIG.SEUIL_ADRESSE_PARTAGEE, complOfficiel: COMPL_RE.test(adresse), plafond: count >= 25 };
+  } catch (e) {
+    if (seq !== partageSeq) return;
+    S.partage = { error: true, complOfficiel: COMPL_RE.test(adresse) };
+  }
+  applyImm(); render();
+}
+function complRequis() {
+  const k = adrKind();
+  if (k === "quest") return S.imm === "oui";
+  if (k === "siege") return !!(S.partage && S.partage.partagee && !S.partage.complOfficiel);
+  return false;
+}
+/* affiche les bons blocs selon le mode d'adresse */
+function applyImm() {
+  const k = adrKind(), P = S.partage;
+  $("#immBlock").classList.toggle("hidden", k !== "quest");
+  $("#balBlock").classList.toggle("hidden", k !== "quest");
+  $("#immLegend").textContent = S.type === "Particulier" ? "Le client habite dans un immeuble ou une résidence ?" : "L'adresse est dans un immeuble, une résidence ou un centre d'affaires ?";
+  $("#immHint").textContent = S.type === "Particulier" ? "Sans bâtiment, étage ou n° d'appartement, les courriers n'arrivent pas." : "Sans bâtiment, étage ou n° de bureau, les courriers n'arrivent pas.";
+  const pb = $("#partageBlock");
+  pb.classList.toggle("hidden", k !== "siege" || !P);
+  if (k === "siege" && P) {
+    if (P.loading) pb.innerHTML = '<div class="box"><span class="spin"></span> Vérification de l\'adresse du siège (domiciliation, centre d\'affaires ?)…</div>';
+    else if (P.error) pb.innerHTML = '<div class="box warn"><div class="t">Adresse du siège non vérifiée</div>Impossible de savoir si cette adresse est une domiciliation ou un centre d\'affaires. Si le client a un n° de bureau ou une référence, indique-le ci-dessous.</div>';
+    else if (P.partagee && P.complOfficiel) pb.innerHTML = `<div class="box ok"><div class="t">✅ Adresse partagée, complément déjà présent</div>Cette adresse héberge ${P.plafond ? "plus de 25" : P.count} sociétés, mais l'adresse officielle contient déjà le complément (bureau, bâtiment, domiciliataire…).</div>`;
+    else if (P.partagee) pb.innerHTML = `<div class="box warn"><div class="t">⚠️ Adresse partagée par ${P.plafond ? "plus de 25" : P.count} sociétés</div>Probablement une domiciliation, un centre d'affaires ou un immeuble de bureaux : demande au client son n° de bureau, sa référence de domiciliation ou le nom du domiciliataire.</div>`;
+    else pb.innerHTML = `<div class="box ok"><div class="t">✅ Adresse individuelle</div>${P.count <= 1 ? "Seule cette société" : P.count + " sociétés seulement"} à cette adresse : le courrier arrive directement, aucun complément nécessaire.</div>`;
+  }
+  // champ complément
+  const show = k === "quest" ? S.imm === "oui" : k === "siege" ? !!(P && !P.loading) : false;
+  $("#complBlock").classList.toggle("hidden", !show);
+  const req = complRequis();
+  $("#complLbl").classList.toggle("req", req);
+  if (k === "quest") {
+    $("#complLbl").textContent = "Complément d'adresse";
+    $("#complHint").textContent = S.type === "Particulier" ? "Bâtiment, étage, n° d'appartement, résidence… tel que le client le dicte." : "Bâtiment, étage, n° de bureau, résidence, centre d'affaires…";
+    $("#compl").placeholder = S.type === "Particulier" ? "ex. Bât. C, 3e étage, appt 12" : "ex. Bât. B, 2e étage, bureau 204";
+  } else if (k === "siege") {
+    $("#complLbl").textContent = req ? "N° de bureau, référence de domiciliation ou nom du domiciliataire" : "Complément d'adresse (facultatif)";
+    $("#complHint").textContent = req ? "Obligatoire pour une adresse partagée : sans cela le courrier ne trouve pas la société." : "Bureau, étage, bâtiment… uniquement si le client en a un.";
+    $("#compl").placeholder = req ? "ex. Bureau 12 — ou : Chez SeDomicilier" : "ex. 2e étage, bureau 204";
+  }
+}
 
 /* ---------- SIRET / SIREN ---------- */
 let siretTimer, siretSeq = 0;
 $("#siret").addEventListener("input", () => {
   clearTimeout(siretTimer);
-  S.societe = null; S.societeOk = false;
+  S.societe = null; S.societeOk = false; S.partage = null; partageSeq++;
   const d = digits($("#siret").value);
   if (d.length === 9 || d.length === 14) { setSiretStatus("loading"); siretTimer = setTimeout(() => lookupSiret(d), 350); }
   else if (d.length === 0) setSiretStatus("");
@@ -298,7 +351,7 @@ async function lookupSiret(d) {
     const s = S.societe;
     if (s.etat !== "A") { S.societeOk = false; setSiretStatus("cessee"); }
     else if (s.etatEtab && s.etatEtab !== "A") { S.societeOk = false; setSiretStatus("etabFerme"); }
-    else { S.societeOk = true; setSiretStatus("ok"); }
+    else { S.societeOk = true; setSiretStatus("ok"); S.partage = null; if (s.siege) checkPartage(s.siege); }
   } catch (e) {
     if (seq !== siretSeq) return;
     S.societe = null; S.societeOk = false; setSiretStatus("erreur", d);
@@ -329,14 +382,11 @@ function useSiege() { if (S.societe && S.societe.siegeSiret) { $("#siret").value
 ["#pays", "#raisonEtr", "#tva"].forEach((s) => $(s).addEventListener("input", render));
 
 /* ---------- adresse ---------- */
-document.querySelectorAll('input[name=adrMode]').forEach((r) => r.addEventListener("change", () => { S.adrMode = r.value; applyAdrMode(); render(); }));
+document.querySelectorAll('input[name=adrMode]').forEach((r) => r.addEventListener("change", () => { S.adrMode = r.value; resetImm(); applyAdrMode(); render(); }));
 function applyAdrMode() {
   const useSiege = S.type === "Société française" && S.adrMode === "siege";
   $("#adrBlock").classList.toggle("hidden", useSiege);
-  if (useSiege && S.societe && S.societe.siege) detectImmeuble(S.societe.siege);
-  const sc = $("#complSiege");
-  sc.classList.toggle("hidden", !siegeAvecComplement());
-  if (siegeAvecComplement()) sc.innerHTML = '<div class="t">✅ Complément déjà présent dans l\'adresse officielle du siège</div>' + titleCase(S.societe.siege) + "<br><small>Complète ci-dessous uniquement s\'il manque quelque chose (étage, n° de bureau…).</small>";
+  applyImm();
 }
 $("#adrHors").addEventListener("change", () => { S.hors = $("#adrHors").checked; S.adr = null; applyHors(); render(); });
 function applyHors() {
@@ -396,15 +446,7 @@ function pickAdr(p) {
   else st.innerHTML = '<div class="box ko"><div class="t">⛔ Adresse trop imprécise</div>Seule la commune ou le lieu-dit est reconnu. Il faut au minimum la rue et le numéro.</div>';
   render();
 }
-function detectImmeuble(txt) {
-  if (S.logement) return;
-  if (IMM_RE.test(txt)) { $("#logB").checked = true; S.logement = $("#logB").value; $("#complBlock").classList.remove("hidden"); }
-}
-document.querySelectorAll('input[name=logement]').forEach((r) => r.addEventListener("change", () => { S.logement = r.value; $("#complBlock").classList.toggle("hidden", !needCompl()); render(); }));
-["#residence", "#batiment", "#etage", "#appt", "#bal"].forEach((s) => $(s).addEventListener("input", render));
-
 /* ---------- validation + récap ---------- */
-function complOk() { return siegeAvecComplement() || !!($("#batiment").value.trim() || $("#appt").value.trim() || $("#residence").value.trim()); }
 function adrOk() {
   if (S.type === "Société française" && S.adrMode === "siege") return !!(S.societe && S.societe.siege);
   if (S.hors) return !!(S.adr && S.adr.libre && S.adr.text.length >= 10);
@@ -424,9 +466,10 @@ function validate() {
     if (bad) errs.push("N° de TVA mal formé.");
   }
   if (S.type && !adrOk()) errs.push(S.hors ? "Saisis l'adresse complète." : "Choisis une adresse dans la liste (rue + numéro).");
-  if (S.type && !S.logement) errs.push(logCfg().errChoix);
-  if (needCompl() && !complOk()) errs.push(logCfg().errCompl);
-  $("#complErr").classList.toggle("hidden", !(needCompl() && !complOk() && ($("#batiment").value || $("#appt").value || $("#residence").value || $("#etage").value)));
+  const k = S.type ? adrKind() : "";
+  if (k === "quest" && !S.imm) errs.push(S.type === "Particulier" ? "Précise si le client habite en immeuble ou en résidence." : "Précise si l'adresse est dans un immeuble ou un centre d'affaires.");
+  if (k === "siege" && S.societeOk && S.partage && S.partage.loading) errs.push("Vérification de l'adresse du siège en cours…");
+  if (complRequis() && !$("#compl").value.trim()) errs.push(k === "siege" ? "N° de bureau ou référence de domiciliation manquant (adresse partagée)." : "Complément d'adresse manquant (bâtiment, étage, n° d'appartement…).");
   return errs;
 }
 function ligneAdresse() {
@@ -434,16 +477,17 @@ function ligneAdresse() {
   if (S.hors) return S.adr.text;
   return S.adr.label;
 }
-function complement() {
-  const parts = [];
-  const r = $("#residence").value.trim(), b = $("#batiment").value.trim(), e = $("#etage").value.trim(), a = $("#appt").value.trim();
-  if (r) parts.push(r);
-  const l2 = [b, e, a].filter(Boolean).join(" – "); if (l2) parts.push(l2);
-  return parts.join("\n");
+function complement() { return $("#complBlock").classList.contains("hidden") ? "" : $("#compl").value.trim(); }
+function nomBal() { return $("#balBlock").classList.contains("hidden") ? "" : $("#bal").value.trim(); }
+function typeLogement() {
+  const k = adrKind(), P = S.partage;
+  if (k === "siege") return !P || P.error ? "Siège (partage non vérifié)" : P.partagee ? `Adresse partagée (${P.plafond ? "25+" : P.count} sociétés)` : "Adresse individuelle";
+  if (k === "etr") return "Hors France (non précisé)";
+  return S.imm === "oui" ? (S.type === "Particulier" ? "Appartement / immeuble" : "Immeuble / centre d'affaires") : (S.type === "Particulier" ? "Maison" : "Accès direct");
 }
 function adressePostale() {
   const lines = [];
-  const bal = $("#bal").value.trim(); if (bal) lines.push(bal);
+  const bal = nomBal(); if (bal) lines.push(bal);
   const c = complement(); if (c) lines.push(c);
   lines.push(ligneAdresse());
   if (S.type === "Société étrangère" && $("#pays").value && $("#pays").value !== "Autre pays (hors UE)" && !/\b(belgique|suisse|luxembourg|allemagne|espagne|italie)\b/i.test(ligneAdresse())) lines.push($("#pays").value);
@@ -472,8 +516,8 @@ $("#go").addEventListener("click", () => {
   q.set("type", S.type);
   q.set("adresse", adressePostale());
   q.set("adr_ligne", ligneAdresse());
-  q.set("adr_complement", [$("#bal").value.trim(), complement()].filter(Boolean).join("\n"));
-  q.set("logement", S.logement);
+  q.set("adr_complement", [nomBal(), complement()].filter(Boolean).join("\n"));
+  q.set("logement", typeLogement());
   q.set("adr_precision", S.hors ? "Hors France (non vérifiée)" : (S.type === "Société française" && S.adrMode === "siege") ? "Siège social (annuaire)" : S.adr.type === "housenumber" ? "Numéro (BAN)" : "Rue (BAN)");
   if (S.type === "Société française") {
     q.set("siret", s.siret); q.set("siren", s.siren); q.set("raison", s.raison); q.set("forme", s.forme); q.set("etat", "Active");
