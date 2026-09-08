@@ -101,6 +101,8 @@
       <p class="hint">Obligatoire pour une société de l'UE (autoliquidation). Format : code pays + numéro, ex. BE0123456789.</p>
       <input type="text" id="tva" autocomplete="off" placeholder="ex. BE0123456789">
       <div id="tvaErr" class="err hidden"></div>
+      <label class="lbl" for="immat" style="margin-top:12px">N° d'immatriculation national <span style="font-weight:400;color:var(--muted)">(facultatif)</span></label>
+      <input type="text" id="immat" autocomplete="off" placeholder="ex. BE 0123.456.789, CHE-123.456.789">
     </fieldset>
 
     <!-- 3. Adresse -->
@@ -393,7 +395,7 @@ function setSiretStatus(kind, extra) {
 function useSiege() { if (S.societe && S.societe.siegeSiret) { $("#siret").value = S.societe.siegeSiret; $("#siret").dispatchEvent(new Event("input")); } }
 
 /* ---------- société étrangère ---------- */
-["#pays", "#raisonEtr", "#tva"].forEach((s) => $(s).addEventListener("input", render));
+["#pays", "#raisonEtr", "#tva", "#immat"].forEach((s) => $(s).addEventListener("input", render));
 
 /* ---------- adresse ---------- */
 document.querySelectorAll('input[name=adrMode]').forEach((r) => r.addEventListener("change", () => { S.adrMode = r.value; resetImm(); applyAdrMode(); render(); }));
@@ -507,6 +509,15 @@ function adressePostale() {
   if (S.type === "Société étrangère" && $("#pays").value && $("#pays").value !== "Autre pays (hors UE)" && !/\b(belgique|suisse|luxembourg|allemagne|espagne|italie)\b/i.test(ligneAdresse())) lines.push($("#pays").value);
   return lines.join("\n");
 }
+function recapLigne() {
+  const s = S.societe, P = S.partage;
+  const adr = adressePostale().split("\n").join(", ");
+  const prec = S.hors ? "adresse saisie librement" : (S.type === "Société française" && S.adrMode === "siege") ? "siège social, annuaire officiel" : S.adr && S.adr.type === "housenumber" ? "adresse vérifiée BAN" : "rue vérifiée BAN";
+  const compl = adrKind() === "siege" && P && !P.error ? (P.domiciliation ? " · domiciliation / centre d'affaires" : P.immeuble ? " · immeuble partagé" : "") : "";
+  if (S.type === "Société française") return `Société française · ${s.raison} · SIRET ${s.siret.replace(/(\d{3})(\d{3})(\d{3})(\d{5})/, "$1 $2 $3 $4")} · ${s.forme} · société active vérifiée le ${new Date().toLocaleDateString("fr-FR")} · Adresse : ${adr} (${prec}${compl})`;
+  if (S.type === "Société étrangère") return `Société étrangère · ${$("#raisonEtr").value.trim()} · ${$("#pays").value}${$("#tva").value.trim() ? " · TVA " + $("#tva").value.replace(/\s/g, "").toUpperCase() : ""}${$("#immat").value.trim() ? " · immatriculation " + $("#immat").value.trim() : ""} · Adresse : ${adr}`;
+  return `Particulier · Adresse : ${adr} (${prec})`;
+}
 function render() {
   const errs = validate();
   const ready = errs.length === 0;
@@ -532,6 +543,7 @@ $("#go").addEventListener("click", () => {
   q.set("adr_ligne", ligneAdresse());
   q.set("adr_complement", [nomBal(), complement()].filter(Boolean).join("\n"));
   q.set("logement", typeLogement());
+  q.set("recap", recapLigne());
   q.set("adr_precision", S.hors ? "Hors France (non vérifiée)" : (S.type === "Société française" && S.adrMode === "siege") ? "Siège social (annuaire)" : S.adr.type === "housenumber" ? "Numéro (BAN)" : "Rue (BAN)");
   if (S.type === "Société française") {
     q.set("siret", s.siret); q.set("siren", s.siren); q.set("raison", s.raison); q.set("forme", s.forme); q.set("etat", "Active");
@@ -539,10 +551,46 @@ $("#go").addEventListener("click", () => {
     q.set("verif", new Date().toISOString().slice(0, 16).replace("T", " "));
   } else if (S.type === "Société étrangère") {
     q.set("pays", $("#pays").value); q.set("raison", $("#raisonEtr").value.trim()); q.set("tva", $("#tva").value.replace(/\s/g, "").toUpperCase()); q.set("etat", "Étrangère (non vérifiable)");
+    if ($("#immat").value.trim()) q.set("siret", $("#immat").value.trim());
   } else { q.set("etat", "Sans objet (particulier)"); }
+  saveDraft();
   const form = params.get("form") ? "https://rdv.arthaudimmobilier.fr/t/" + params.get("form") : CONFIG.FORM_URL;
   location.assign(form + "?" + q.toString());
 });
+
+/* ---------- brouillon : la saisie est conservée si le closer revient de l'étape 2 (flèche ← du navigateur) ---------- */
+const DRAFT_KEY = "precontrat:" + (params.get("appel") || "sans-appel");
+function saveDraft() {
+  try {
+    const d = { type: S.type, siret: $("#siret").value, adrMode: S.adrMode, hors: S.hors, adr: $("#adr").value, adrSel: S.adr, adrLibre: $("#adrLibre").value,
+      imm: S.imm, compl: $("#compl").value, bal: $("#bal").value, pays: $("#pays").value, raisonEtr: $("#raisonEtr").value, tva: $("#tva").value, immat: $("#immat").value, t: Date.now() };
+    sessionStorage.setItem(DRAFT_KEY, JSON.stringify(d));
+  } catch (e) { /* stockage indisponible : on continue sans */ }
+}
+["#siret", "#adr", "#adrLibre", "#compl", "#bal", "#pays", "#raisonEtr", "#tva", "#immat"].forEach((sel) => $(sel).addEventListener("input", saveDraft));
+document.querySelectorAll('input[name=type], input[name=adrMode], input[name=imm], #adrHors').forEach((r) => r.addEventListener("change", saveDraft));
+function restoreDraft() {
+  let d = null;
+  try { d = JSON.parse(sessionStorage.getItem(DRAFT_KEY) || "null"); } catch (e) { return; }
+  if (!d || !d.type || Date.now() - (d.t || 0) > 6 * 3600 * 1000) return;
+  const typeRadio = document.querySelector(`input[name=type][value="${d.type}"]`); if (!typeRadio) return;
+  typeRadio.checked = true; typeRadio.dispatchEvent(new Event("change"));
+  $("#pays").value = d.pays || ""; $("#raisonEtr").value = d.raisonEtr || ""; $("#tva").value = d.tva || ""; $("#immat").value = d.immat || "";
+  if (d.type === "Société française" && d.adrMode) { S.adrMode = d.adrMode; const r = document.querySelector(`input[name=adrMode][value="${d.adrMode}"]`); if (r) r.checked = true; }
+  if (d.type !== "Société étrangère") { S.hors = !!d.hors; applyHors(); }
+  if (d.adrSel) { S.adr = d.adrSel; $("#adr").value = d.adr || ""; $("#adrLibre").value = d.adrLibre || ""; if (S.adr && !S.adr.libre) pickAdr(S.adr); }
+  applyAdrMode();
+  if (d.imm) { S.imm = d.imm; const r = document.querySelector(`input[name=imm][value="${d.imm}"]`); if (r) r.checked = true; }
+  $("#compl").value = d.compl || ""; $("#bal").value = d.bal || "";
+  applyImm();
+  if (d.type === "Société française" && d.siret) { $("#siret").value = d.siret; $("#siret").dispatchEvent(new Event("input")); }
+  const n = document.createElement("div"); n.className = "banner"; n.id = "draftBanner";
+  n.innerHTML = "↩️ Ta saisie précédente a été restaurée. Modifie ce qu'il faut, puis « Continuer vers le contrat ». <button type=\"button\" class=\"btn sec\" style=\"padding:2px 8px;margin-left:8px\" onclick=\"resetDraft()\">Repartir de zéro</button>";
+  $("#bannerParams").insertAdjacentElement("afterend", n);
+  render();
+}
+function resetDraft() { try { sessionStorage.removeItem(DRAFT_KEY); } catch (e) {} location.reload(); }
+restoreDraft();
 </script>
 </body>
 </html>
