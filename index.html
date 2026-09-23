@@ -148,6 +148,18 @@
       </div>
     </fieldset>
 
+    <!-- 4. Qui signe le contrat -->
+    <fieldset id="fsSign" class="hidden">
+      <legend class="req">Qui signe le contrat&nbsp;?</legend>
+      <p class="hint">Par défaut, le contrat est établi au nom de la personne qui a pris le rendez-vous. Change ici si ce n'est pas elle qui signe : le conjoint, le dirigeant de la société…</p>
+      <div class="choices" id="signChoices"></div>
+      <div id="signAutreWrap" class="hidden" style="margin-top:10px">
+        <label class="lbl req" for="signAutre">Nom et prénom du signataire</label>
+        <p class="hint">Exactement comme il doit apparaître sur le contrat.</p>
+        <input type="text" id="signAutre" autocomplete="off" placeholder="ex. Pascal LORUSSO">
+      </div>
+    </fieldset>
+
     <!-- Récap -->
     <fieldset id="fsRecap" class="hidden">
       <legend>Récapitulatif</legend>
@@ -214,6 +226,7 @@ const S = {
   hors: false,
   imm: "", // oui | non — « immeuble / résidence ? » (particulier, ou société avec une autre adresse que le siège)
   partage: null, // siège social : null (pas vérifié) | { loading } | { error } | { count, total, domiciliation, domiciliataire, immeuble, complOfficiel }
+  sign: "contact", // contact | dir:<i> | autre — qui signe le contrat
 };
 
 /* ---------- pays ---------- */
@@ -469,6 +482,42 @@ function adrOk() {
   if (S.hors) return !!(S.adr && S.adr.libre && S.adr.text.length >= 10);
   return !!(S.adr && !S.adr.libre && (S.adr.type === "housenumber" || S.adr.type === "street"));
 }
+/* ---------- qui signe le contrat ---------- */
+// Le nom imprime sur le contrat vient de "Signataire - nom" sur la vente quand il est
+// renseigne, sinon du contact lie. Cette question est le seul endroit ou le closer
+// peut le dire au moment du call ; laisse "la personne qui a pris le rendez-vous"
+// et rien n'est transmis, le comportement d'avant est conserve.
+function dirigeantsListe() {
+  const raw = (S.societe && S.societe.dirigeant) ? String(S.societe.dirigeant) : "";
+  return raw.split(" ; ").map((x) => x.split("—")[0].replace(/\s*\(.*\)\s*$/, "").trim()).filter(Boolean);
+}
+const escHtml = (s) => (s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+let _signSig = null;
+function applySign() {
+  const dirs = S.type === "Société française" ? dirigeantsListe() : [];
+  if (S.sign.indexOf("dir:") === 0 && !dirs[Number(S.sign.slice(4))]) S.sign = "contact";
+  const sig = S.type + "|" + dirs.join("|") + "|" + S.sign;
+  if (sig !== _signSig) {
+    _signSig = sig;
+    const opts = [{ v: "contact", l: "La personne qui a pris le rendez-vous" }]
+      .concat(dirs.map((n, i) => ({ v: "dir:" + i, l: "Le dirigeant : <b>" + escHtml(n) + "</b>" })))
+      .concat([{ v: "autre", l: "Quelqu'un d'autre" }]);
+    $("#signChoices").innerHTML = opts.map((o) =>
+      `<label><input type="radio" name="sign" value="${o.v}"${S.sign === o.v ? " checked" : ""}> ${o.l}</label>`).join("");
+  }
+  $("#signAutreWrap").classList.toggle("hidden", S.sign !== "autre");
+  $("#fsSign").classList.toggle("hidden", !S.type);
+}
+function signataireNom() {
+  if (S.sign === "autre") return $("#signAutre").value.trim();
+  if (S.sign.indexOf("dir:") === 0) return dirigeantsListe()[Number(S.sign.slice(4))] || "";
+  return "";
+}
+document.addEventListener("change", (e) => {
+  if (e.target && e.target.name === "sign") { S.sign = e.target.value; applySign(); saveDraft(); render(); }
+});
+$("#signAutre").addEventListener("input", () => { saveDraft(); render(); });
+
 function validate() {
   const errs = [];
   if (!S.type) errs.push("Choisis le type de client.");
@@ -486,6 +535,7 @@ function validate() {
   const k = S.type ? adrKind() : "";
   if (k === "quest" && !S.imm) errs.push(S.type === "Particulier" ? "Précise si le client habite en immeuble ou en résidence." : "Précise si l'adresse est dans un immeuble ou un centre d'affaires.");
   if (k === "siege" && S.societeOk && S.partage && S.partage.loading) errs.push("Vérification de l'adresse du siège en cours…");
+  if (S.type && S.sign === "autre" && !$("#signAutre").value.trim()) errs.push("Renseigne le nom et le prénom du signataire.");
   if (complRequis() && !$("#compl").value.trim()) errs.push(k === "siege" ? "N° de bureau ou référence de domiciliation manquant (adresse partagée)." : "Complément d'adresse manquant (bâtiment, étage, n° d'appartement…).");
   return errs;
 }
@@ -534,6 +584,7 @@ function recapParts() {
   return { titre, id, adresse: adr + (lieu ? ` (${lieu})` : "") };
 }
 function render() {
+  applySign();
   const errs = validate();
   const ready = errs.length === 0;
   $("#go").disabled = !ready;
@@ -543,7 +594,8 @@ function render() {
   if (ready) {
     const s = S.societe;
     const head = S.type === "Société française" ? `${s.raison} — SIRET ${s.siret} — ${s.forme}` : S.type === "Société étrangère" ? `${$("#raisonEtr").value.trim()} — ${$("#pays").value}${$("#tva").value ? " — TVA " + $("#tva").value.toUpperCase() : ""}` : "Particulier";
-    $("#recap").textContent = head + "\n\n" + adressePostale();
+    const sg = signataireNom();
+    $("#recap").textContent = head + "\n\n" + adressePostale() + "\n\nSignataire : " + (sg || "la personne qui a pris le rendez-vous");
   }
 }
 
@@ -558,6 +610,7 @@ $("#go").addEventListener("click", () => {
   q.set("adr_ligne", ligneAdresse());
   q.set("adr_complement", [nomBal(), complement()].filter(Boolean).join("\n"));
   q.set("logement", typeLogement());
+  q.set("signataire", signataireNom());
   const rc = recapParts(); q.set("recap", rc.titre); q.set("recap_id", rc.id); q.set("recap_adresse", rc.adresse);
   q.set("adr_precision", S.hors ? "Hors France (non vérifiée)" : (S.type === "Société française" && S.adrMode === "siege") ? "Siège social (annuaire)" : S.adr.type === "housenumber" ? "Numéro (BAN)" : "Rue (BAN)");
   if (S.type === "Société française") {
@@ -578,7 +631,8 @@ const DRAFT_KEY = "precontrat:" + (params.get("appel") || "sans-appel");
 function saveDraft() {
   try {
     const d = { type: S.type, siret: $("#siret").value, adrMode: S.adrMode, hors: S.hors, adr: $("#adr").value, adrSel: S.adr, adrLibre: $("#adrLibre").value,
-      imm: S.imm, compl: $("#compl").value, bal: $("#bal").value, pays: $("#pays").value, raisonEtr: $("#raisonEtr").value, tva: $("#tva").value, immat: $("#immat").value, t: Date.now() };
+      imm: S.imm, compl: $("#compl").value, bal: $("#bal").value, pays: $("#pays").value, raisonEtr: $("#raisonEtr").value, tva: $("#tva").value, immat: $("#immat").value,
+      sign: S.sign, signAutre: $("#signAutre").value, t: Date.now() };
     sessionStorage.setItem(DRAFT_KEY, JSON.stringify(d));
   } catch (e) { /* stockage indisponible : on continue sans */ }
 }
@@ -598,6 +652,9 @@ function restoreDraft() {
   if (d.imm) { S.imm = d.imm; const r = document.querySelector(`input[name=imm][value="${d.imm}"]`); if (r) r.checked = true; }
   $("#compl").value = d.compl || ""; $("#bal").value = d.bal || "";
   applyImm();
+  if (d.sign) S.sign = d.sign;
+  $("#signAutre").value = d.signAutre || "";
+  applySign();
   if (d.type === "Société française" && d.siret) { $("#siret").value = d.siret; $("#siret").dispatchEvent(new Event("input")); }
   const n = document.createElement("div"); n.className = "banner"; n.id = "draftBanner";
   n.innerHTML = "↩️ Ta saisie précédente a été restaurée. Modifie ce qu'il faut, puis « Continuer vers le contrat ». <button type=\"button\" class=\"btn sec\" style=\"padding:2px 8px;margin-left:8px\" onclick=\"resetDraft()\">Repartir de zéro</button>";
