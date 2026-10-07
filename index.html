@@ -182,8 +182,12 @@ const CONFIG = {
   // Formulaire Fillout de l'étape 2 (« Envoyer un contrat »), en production depuis le 08/09/2026
   // (ancien formulaire pLuPh3zjqyus conservé en secours). Peut être remplacé à la volée par ?form=<identifiant> pour tester une copie.
   FORM_URL: "https://rdv.arthaudimmobilier.fr/t/87brFhBVfPus",
-  // Paramètres d'URL transmis tels quels de l'interface Airtable vers Fillout
-  PASSTHROUGH: ["appel", "contact", "vendeur"],
+  // Paramètres d'URL transmis tels quels de l'interface Airtable vers Fillout.
+  // « id » (07/10/2026) : identifiant d'une vente déjà créée (parcours Encaisser / Envoyer le contrat) ;
+  // le bouton passe alors aussi ?form=<formulaire « vente existante »>, qui met à jour cette vente au lieu d'en créer une.
+  PASSTHROUGH: ["appel", "contact", "vendeur", "id"],
+  // Paramètres obligatoires (sinon bandeau « ouvert sans l'interface ») : « id » reste facultatif.
+  REQUIRED: ["appel", "contact", "vendeur"],
   API_ENTREPRISES: "https://recherche-entreprises.api.gouv.fr/search",
   API_ADRESSE: ["https://api-adresse.data.gouv.fr/search/", "https://data.geopf.fr/geocodage/search"],
   // Détection « domiciliation / centre d'affaires » sur l'adresse du siège (n° de bureau ou référence alors obligatoire) :
@@ -231,7 +235,7 @@ const S = {
 
 /* ---------- pays ---------- */
 $("#pays").innerHTML = '<option value="">— choisir —</option>' + PAYS.map((p) => `<option>${p}</option>`).join("");
-if (!CONFIG.PASSTHROUGH.every((k) => params.get(k))) $("#bannerParams").classList.remove("hidden");
+if (!CONFIG.REQUIRED.every((k) => params.get(k))) $("#bannerParams").classList.remove("hidden");
 
 /* ---------- type de client ---------- */
 document.querySelectorAll('input[name=type]').forEach((r) => r.addEventListener("change", () => {
